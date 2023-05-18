@@ -1,6 +1,7 @@
 extern crate chrono;
 extern crate serde;
 extern crate tera;
+extern crate git2;
 
 use serde::Deserialize;
 
@@ -8,6 +9,7 @@ use chrono::prelude::*;
 use std::collections::VecDeque;
 use std::env;
 use tera::{Context, Tera};
+use git2::{Repository, DiffOptions};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,14 +21,15 @@ struct Page {
 
 impl Page {
     fn new(p: PathBuf) -> Page {
-        let content = fs::read_to_string(p).unwrap();
+        let content = fs::read_to_string(&p).unwrap();
         let parts: Vec<&str> = content.splitn(2, "\n---\n").collect();
         let config: Config = toml::from_str(parts[0]).unwrap();
+        let (published, modified) = get_times_for_path(p.as_ref());
         Page {
             meta: Metadata {
                 title: config.title,
-                published_time: Utc::now(),
-                modified_time: Utc::now(),
+                published_time: published,
+                modified_time: modified,
             },
             template: parts[1].to_owned(),
         }
@@ -42,6 +45,45 @@ struct Metadata {
 #[derive(Deserialize)]
 struct Config {
     title: String,
+}
+
+fn get_times_for_path(path: &Path) -> (DateTime<Utc>,DateTime<Utc>) {
+    let mut created = Utc::now();
+    let mut modified = Utc.timestamp_opt(0, 0).unwrap();
+
+    let repo = Repository::discover(path).unwrap();
+    let workdir = repo.workdir().unwrap();
+    let abs_path = fs::canonicalize(path).unwrap();
+    let rel_path = abs_path.strip_prefix(fs::canonicalize(workdir).unwrap()).unwrap();
+    let mut revwalk = repo.revwalk().unwrap();
+    revwalk.set_sorting(git2::Sort::TIME).unwrap();
+    revwalk.push_head().unwrap();
+    while let Some(rev) = revwalk.next() {
+        let oid = rev.unwrap();
+        let commit = repo.find_commit(oid).unwrap();
+        println!("revwalk commit {:?}", commit);
+        let tree = commit.tree().unwrap();
+        let old_tree = if commit.parent_count() > 0 {
+            let parent = commit.parent(0).unwrap();
+            Some(parent.tree().unwrap())
+        } else {None};
+
+        let mut opts = DiffOptions::new();
+        let diff = repo.diff_tree_to_tree(old_tree.as_ref(), Some(&tree), Some(&mut opts)).unwrap();
+        let mut deltas = diff.deltas();
+        let contains = deltas.any(|dd| {
+            dd.new_file().path().unwrap().eq(rel_path) 
+        });
+        println!("contains {:?}", contains);
+        if contains {
+            let t = commit.time();
+            let time = Utc.timestamp_opt(t.seconds() - (t.offset_minutes() as i64) * 60i64, 0).unwrap();
+            println!("time: {:?}", time);
+            if time < created {created = time;}
+            if time > modified {modified = time;}
+        }
+    }
+    (created, modified)
 }
 
 fn main() {
