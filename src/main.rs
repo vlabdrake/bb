@@ -1,15 +1,15 @@
 extern crate chrono;
+extern crate git2;
 extern crate serde;
 extern crate tera;
-extern crate git2;
 
 use serde::Deserialize;
 
 use chrono::prelude::*;
+use git2::{Commit, DiffOptions, Repository};
 use std::collections::VecDeque;
 use std::env;
 use tera::{Context, Tera};
-use git2::{Repository, DiffOptions};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,11 +20,12 @@ struct Page {
 }
 
 impl Page {
-    fn new(p: PathBuf) -> Page {
+    fn new(p: &Path) -> Page {
         let content = fs::read_to_string(&p).unwrap();
         let parts: Vec<&str> = content.splitn(2, "\n---\n").collect();
         let config: Config = toml::from_str(parts[0]).unwrap();
-        let (published, modified) = get_times_for_path(p.as_ref());
+        let (published, modified) =
+            get_times_for_path(p.as_ref()).unwrap_or((Utc::now(), Utc::now()));
         Page {
             meta: Metadata {
                 title: config.title,
@@ -47,43 +48,53 @@ struct Config {
     title: String,
 }
 
-fn get_times_for_path(path: &Path) -> (DateTime<Utc>,DateTime<Utc>) {
-    let mut created = Utc::now();
-    let mut modified = Utc.timestamp_opt(0, 0).unwrap();
+fn is_file_changed_in_commit(repo: &Repository, commit: &Commit, path: &Path) -> bool {
+    let parent_tree = commit.parent(0).ok().and_then(|commit| commit.tree().ok());
 
-    let repo = Repository::discover(path).unwrap();
-    let workdir = repo.workdir().unwrap();
-    let abs_path = fs::canonicalize(path).unwrap();
-    let rel_path = abs_path.strip_prefix(fs::canonicalize(workdir).unwrap()).unwrap();
-    let mut revwalk = repo.revwalk().unwrap();
-    revwalk.set_sorting(git2::Sort::TIME).unwrap();
-    revwalk.push_head().unwrap();
-    while let Some(rev) = revwalk.next() {
-        let oid = rev.unwrap();
-        let commit = repo.find_commit(oid).unwrap();
-        println!("revwalk commit {:?}", commit);
-        let tree = commit.tree().unwrap();
-        let old_tree = if commit.parent_count() > 0 {
-            let parent = commit.parent(0).unwrap();
-            Some(parent.tree().unwrap())
-        } else {None};
+    let mut opts = DiffOptions::new();
+    repo.diff_tree_to_tree(
+        parent_tree.as_ref(),
+        commit.tree().ok().as_ref(),
+        Some(&mut opts),
+    )
+    .ok()
+    .map(|diff| {
+        diff.deltas()
+            .any(|dd| dd.new_file().path().map(|p| p.eq(path)).unwrap_or(false))
+    })
+    .unwrap_or(false)
+}
 
-        let mut opts = DiffOptions::new();
-        let diff = repo.diff_tree_to_tree(old_tree.as_ref(), Some(&tree), Some(&mut opts)).unwrap();
-        let mut deltas = diff.deltas();
-        let contains = deltas.any(|dd| {
-            dd.new_file().path().unwrap().eq(rel_path) 
-        });
-        println!("contains {:?}", contains);
-        if contains {
-            let t = commit.time();
-            let time = Utc.timestamp_opt(t.seconds() - (t.offset_minutes() as i64) * 60i64, 0).unwrap();
-            println!("time: {:?}", time);
-            if time < created {created = time;}
-            if time > modified {modified = time;}
-        }
-    }
-    (created, modified)
+fn get_commit_time(commit: &Commit) -> Option<DateTime<Utc>> {
+    let t = commit.time();
+    Utc.timestamp_opt(t.seconds() - (t.offset_minutes() as i64) * 60i64, 0)
+        .single()
+}
+
+fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let repo = Repository::discover(path).ok()?;
+    let workdir = repo.workdir()?;
+    let abs_path = fs::canonicalize(path).ok()?;
+    let repo_path = fs::canonicalize(workdir).ok()?;
+    let rel_path = abs_path.strip_prefix(repo_path).ok()?;
+    let mut revwalk = repo.revwalk().ok()?;
+    revwalk.set_sorting(git2::Sort::TIME).ok()?;
+    revwalk.push_head().ok()?;
+    let mut iter = revwalk.filter_map(|rev| {
+        rev.ok()
+            .and_then(|oid| repo.find_commit(oid).ok()) // get commit
+            .and_then(|commit| {
+                // get commit time
+                if is_file_changed_in_commit(&repo, &commit, &rel_path) {
+                    get_commit_time(&commit)
+                } else {
+                    None
+                }
+            })
+    });
+    let modified = iter.next()?;
+    let created = iter.last().unwrap_or(modified);
+    Some((created, modified))
 }
 
 fn main() {
@@ -126,7 +137,7 @@ fn main() {
                 let ext = path.extension();
                 if ext != None && ext.unwrap() == "html" {
                     println!("write to {:?}", dst_path);
-                    let page = Page::new(path);
+                    let page = Page::new(path.as_ref());
                     let mut context = Context::new();
                     context.insert("title", &page.meta.title);
                     context.insert("published_time", &page.meta.published_time.to_rfc3339());
