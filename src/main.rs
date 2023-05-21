@@ -21,9 +21,11 @@ struct Page {
 
 impl Page {
     fn new(p: &Path) -> Page {
-        let content = fs::read_to_string(&p).unwrap();
+        let content = fs::read_to_string(&p).unwrap_or("".to_owned());
         let parts: Vec<&str> = content.splitn(2, "\n---\n").collect();
-        let config: Config = toml::from_str(parts[0]).unwrap();
+        let config: Config = toml::from_str(parts[0]).unwrap_or(Config {
+            title: "undefined".to_owned(),
+        });
         let (published, modified) =
             get_times_for_path(p.as_ref()).unwrap_or((Utc::now(), Utc::now()));
         Page {
