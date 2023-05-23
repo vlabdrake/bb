@@ -23,31 +23,27 @@ impl Page {
     fn new(p: &Path) -> Page {
         let content = fs::read_to_string(&p).unwrap_or("".to_owned());
         let parts: Vec<&str> = content.splitn(2, "\n---\n").collect();
-        let config: Config = toml::from_str(parts[0]).unwrap_or(Config {
-            title: "undefined".to_owned(),
-        });
+        let mut meta: Metadata = toml::from_str(parts[0]).unwrap();
         let (published, modified) =
             get_times_for_path(p.as_ref()).unwrap_or((Utc::now(), Utc::now()));
+        meta.published_time = published;
+        meta.modified_time = modified;
         Page {
-            meta: Metadata {
-                title: config.title,
-                published_time: published,
-                modified_time: modified,
-            },
+            meta: meta,
             template: parts[1].to_owned(),
         }
     }
 }
 
+#[derive(Deserialize)]
 struct Metadata {
     pub title: String,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    #[serde(skip_deserializing)]
     pub published_time: DateTime<Utc>,
+    #[serde(skip_deserializing)]
     pub modified_time: DateTime<Utc>,
-}
-
-#[derive(Deserialize)]
-struct Config {
-    title: String,
 }
 
 fn is_file_changed_in_commit(repo: &Repository, commit: &Commit, path: &Path) -> bool {
@@ -82,7 +78,7 @@ fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let mut revwalk = repo.revwalk().ok()?;
     revwalk.set_sorting(git2::Sort::TIME).ok()?;
     revwalk.push_head().ok()?;
-    let mut iter = revwalk.filter_map(|rev| {
+    let mut modification_timestamps = revwalk.filter_map(|rev| {
         rev.ok()
             .and_then(|oid| repo.find_commit(oid).ok()) // get commit
             .and_then(|commit| {
@@ -94,8 +90,8 @@ fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
                 }
             })
     });
-    let modified = iter.next()?;
-    let created = iter.last().unwrap_or(modified);
+    let modified = modification_timestamps.next()?;
+    let created = modification_timestamps.last().unwrap_or(modified);
     Some((created, modified))
 }
 
@@ -142,6 +138,8 @@ fn main() {
                     let page = Page::new(path.as_ref());
                     let mut context = Context::new();
                     context.insert("title", &page.meta.title);
+                    context.insert("description", &page.meta.description);
+                    context.insert("image", &page.meta.image);
                     context.insert("published_time", &page.meta.published_time.to_rfc3339());
                     context.insert("modified_time", &page.meta.modified_time.to_rfc3339());
                     context.insert(
