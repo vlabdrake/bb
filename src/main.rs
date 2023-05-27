@@ -133,7 +133,7 @@ fn main() {
                     }
                 }
                 let ext = path.extension();
-                if ext != None && ext.unwrap() == "html" {
+                if ext.map_or(false, |e| e == "html") {
                     println!("write to {:?}", dst_path);
                     let page = Page::new(path.as_ref());
                     let mut context = Context::new();
