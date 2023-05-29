@@ -65,8 +65,7 @@ fn is_file_changed_in_commit(repo: &Repository, commit: &Commit, path: &Path) ->
 
 fn get_commit_time(commit: &Commit) -> Option<DateTime<Utc>> {
     let t = commit.time();
-    Utc.timestamp_opt(t.seconds() - (t.offset_minutes() as i64) * 60i64, 0)
-        .single()
+    Utc.timestamp_opt(t.seconds(), 0).single()
 }
 
 fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
