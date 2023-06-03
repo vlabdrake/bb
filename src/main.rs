@@ -94,6 +94,15 @@ fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     Some((created, modified))
 }
 
+fn get_relative_link(relative_path: &Path) -> Option<&Path> {
+    let filename = relative_path.file_name()?;
+    if filename == "index.html" {
+        relative_path.parent()
+    } else {
+        Some(relative_path)
+    }
+}
+
 fn main() {
     let args: Vec<_> = env::args().collect();
     if args.len() != 3 {
@@ -116,6 +125,7 @@ fn main() {
             let entry = entry.unwrap();
             let path = entry.path();
             let filename = path.file_name().unwrap().to_str().unwrap();
+            let relative_path = path.strip_prefix(src).unwrap();
             println!("{:?}", path);
             if filename.starts_with(".") || filename.starts_with("_") {
                 continue;
@@ -123,7 +133,7 @@ fn main() {
             if path.is_dir() {
                 queue.push_back(path);
             } else {
-                let dst_path = dst.join(path.clone().strip_prefix(src).unwrap());
+                let dst_path = dst.join(&relative_path);
                 let dst_parent = dst_path.parent().unwrap();
                 if !dst_parent.exists() {
                     if let Err(err) = fs::create_dir_all(dst_parent) {
@@ -149,6 +159,7 @@ fn main() {
                             .format_localized("%e %B %Y", Locale::ru_RU)
                             .to_string(),
                     );
+                    context.insert("link", &get_relative_link(relative_path));
                     let result = tera.render_str(&page.template, &context).unwrap();
                     if let Err(err) = fs::write(dst_path, result) {
                         println!("{:?}", err);
