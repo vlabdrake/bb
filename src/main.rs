@@ -3,7 +3,7 @@ extern crate git2;
 extern crate serde;
 extern crate tera;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use chrono::prelude::*;
 use git2::{Commit, DiffOptions, Repository};
@@ -24,10 +24,20 @@ impl Page {
         let content = fs::read_to_string(&p).unwrap_or("".to_owned());
         let parts: Vec<&str> = content.splitn(2, "\n---\n").collect();
         let mut meta: Metadata = toml::from_str(parts[0]).unwrap();
-        let (published, modified) =
-            get_times_for_path(p.as_ref()).unwrap_or((Utc::now(), Utc::now()));
-        meta.published_time = published;
-        meta.modified_time = modified;
+        meta.history = get_edits_for_file(p).unwrap_or_default();
+
+        meta.published_time = meta
+            .history
+            .iter()
+            .map(|edit| edit.datetime)
+            .min()
+            .unwrap_or(Utc::now());
+        meta.last_modified_time = meta
+            .history
+            .iter()
+            .map(|edit| edit.datetime)
+            .max()
+            .unwrap_or(Utc::now());
         Page {
             meta: meta,
             template: parts[1].to_owned(),
@@ -43,7 +53,37 @@ struct Metadata {
     #[serde(skip_deserializing)]
     pub published_time: DateTime<Utc>,
     #[serde(skip_deserializing)]
-    pub modified_time: DateTime<Utc>,
+    pub last_modified_time: DateTime<Utc>,
+    #[serde(skip_deserializing)]
+    pub history: Vec<Edit>,
+}
+
+#[derive(Serialize)]
+struct Edit {
+    #[serde(with = "my_date_format")]
+    pub datetime: DateTime<Utc>,
+    pub summary: String,
+    pub message: String,
+}
+
+mod my_date_format {
+    use chrono::{DateTime, Locale, Utc};
+    use serde::{self, Serializer};
+
+    // The signature of a serialize_with function must follow the pattern:
+    //
+    //    fn serialize<S>(&T, S) -> Result<S::Ok, S::Error>
+    //    where
+    //        S: Serializer
+    //
+    // although it may also be generic over the input types T.
+    pub fn serialize<S>(date: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = date.format_localized("%e %B %Y", Locale::ru_RU).to_string();
+        serializer.serialize_str(&s)
+    }
 }
 
 fn is_file_changed_in_commit(repo: &Repository, commit: &Commit, path: &Path) -> bool {
@@ -68,7 +108,7 @@ fn get_commit_time(commit: &Commit) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(t.seconds(), 0).single()
 }
 
-fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+fn get_edits_for_file(path: &Path) -> Option<Vec<Edit>> {
     let repo = Repository::discover(path).ok()?;
     let workdir = repo.workdir()?;
     let abs_path = fs::canonicalize(path).ok()?;
@@ -77,21 +117,25 @@ fn get_times_for_path(path: &Path) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let mut revwalk = repo.revwalk().ok()?;
     revwalk.set_sorting(git2::Sort::TIME).ok()?;
     revwalk.push_head().ok()?;
-    let mut modification_timestamps = revwalk.filter_map(|rev| {
-        rev.ok()
-            .and_then(|oid| repo.find_commit(oid).ok()) // get commit
-            .and_then(|commit| {
-                // get commit time
-                if is_file_changed_in_commit(&repo, &commit, &rel_path) {
-                    get_commit_time(&commit)
-                } else {
-                    None
-                }
+    Some(
+        revwalk
+            .filter_map(|rev| {
+                rev.ok()
+                    .and_then(|oid| repo.find_commit(oid).ok()) // get commit
+                    .and_then(|commit| {
+                        if is_file_changed_in_commit(&repo, &commit, &rel_path) {
+                            Some(Edit {
+                                datetime: get_commit_time(&commit).unwrap_or(Utc::now()),
+                                summary: commit.summary().unwrap_or_default().to_owned(),
+                                message: commit.message().unwrap_or_default().to_owned(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
             })
-    });
-    let modified = modification_timestamps.next()?;
-    let created = modification_timestamps.last().unwrap_or(modified);
-    Some((created, modified))
+            .collect(),
+    )
 }
 
 fn get_relative_link(relative_path: &Path) -> Option<&Path> {
@@ -150,7 +194,10 @@ fn main() {
                     context.insert("description", &page.meta.description);
                     context.insert("image", &page.meta.image);
                     context.insert("published_time", &page.meta.published_time.to_rfc3339());
-                    context.insert("modified_time", &page.meta.modified_time.to_rfc3339());
+                    context.insert(
+                        "last_modified_time",
+                        &page.meta.last_modified_time.to_rfc3339(),
+                    );
                     context.insert(
                         "date",
                         &page
@@ -160,6 +207,7 @@ fn main() {
                             .to_string(),
                     );
                     context.insert("link", &get_relative_link(relative_path));
+                    context.insert("history", &page.meta.history);
                     let result = tera.render_str(&page.template, &context).unwrap();
                     if let Err(err) = fs::write(dst_path, result) {
                         println!("{:?}", err);
