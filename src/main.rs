@@ -117,25 +117,25 @@ fn get_edits_for_file(path: &Path) -> Option<Vec<Edit>> {
     let mut revwalk = repo.revwalk().ok()?;
     revwalk.set_sorting(git2::Sort::TIME).ok()?;
     revwalk.push_head().ok()?;
-    Some(
-        revwalk
-            .filter_map(|rev| {
-                rev.ok()
-                    .and_then(|oid| repo.find_commit(oid).ok()) // get commit
-                    .and_then(|commit| {
-                        if is_file_changed_in_commit(&repo, &commit, &rel_path) {
-                            Some(Edit {
-                                datetime: get_commit_time(&commit).unwrap_or(Utc::now()),
-                                summary: commit.summary().unwrap_or_default().to_owned(),
-                                message: commit.message().unwrap_or_default().to_owned(),
-                            })
-                        } else {
-                            None
-                        }
-                    })
-            })
-            .collect(),
-    )
+    let mut history: Vec<Edit> = revwalk
+        .filter_map(|rev| {
+            rev.ok()
+                .and_then(|oid| repo.find_commit(oid).ok()) // get commit
+                .and_then(|commit| {
+                    if is_file_changed_in_commit(&repo, &commit, &rel_path) {
+                        Some(Edit {
+                            datetime: get_commit_time(&commit).unwrap_or(Utc::now()),
+                            summary: commit.summary().unwrap_or_default().to_owned(),
+                            message: commit.message().unwrap_or_default().to_owned(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+    history.sort_by_key(|e| e.datetime);
+    Some(history)
 }
 
 fn get_relative_link(relative_path: &Path) -> Option<&Path> {
