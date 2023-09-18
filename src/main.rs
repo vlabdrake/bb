@@ -1,12 +1,13 @@
 extern crate chrono;
-extern crate git2;
+extern crate gix;
 extern crate minijinja;
 extern crate serde;
 
 use serde::{Deserialize, Serialize};
 
 use chrono::prelude::*;
-use git2::{Commit, DiffOptions, Repository};
+use gix::object::tree::diff::Action;
+use gix::{discover, Commit, Repository};
 use minijinja::{context, path_loader, Environment};
 use std::collections::VecDeque;
 use std::env;
@@ -87,46 +88,58 @@ mod my_date_format {
 }
 
 fn is_file_changed_in_commit(repo: &Repository, commit: &Commit, path: &Path) -> bool {
-    let parent_tree = commit.parent(0).ok().and_then(|commit| commit.tree().ok());
+    let parent_tree = commit
+        .parent_ids()
+        .next()
+        .and_then(|id| id.object().ok()?.try_into_commit().ok()?.tree().ok())
+        .unwrap_or(repo.empty_tree());
 
-    let mut opts = DiffOptions::new();
-    repo.diff_tree_to_tree(
-        parent_tree.as_ref(),
-        commit.tree().ok().as_ref(),
-        Some(&mut opts),
-    )
-    .ok()
-    .map(|diff| {
-        diff.deltas()
-            .any(|dd| dd.new_file().path().map(|p| p.eq(path)).unwrap_or(false))
-    })
-    .unwrap_or(false)
+    parent_tree
+        .changes()
+        .ok()
+        .map(|mut p| {
+            let mut changed = false;
+            let _ = p.track_path().for_each_to_obtain_tree(
+                &commit.tree().unwrap(),
+                |change| -> Result<_, std::convert::Infallible> {
+                    if change.location == path.to_str().unwrap() {
+                        changed = true;
+                        Ok(Action::Cancel)
+                    } else {
+                        Ok(Action::Continue)
+                    }
+                },
+            );
+            changed
+        })
+        .unwrap_or(false)
 }
 
 fn get_commit_time(commit: &Commit) -> Option<DateTime<Utc>> {
-    let t = commit.time();
-    Utc.timestamp_opt(t.seconds(), 0).single()
+    let t = commit.time().ok().unwrap();
+    Utc.timestamp_opt(t.seconds, 0).single()
 }
 
 fn get_edits_for_file(path: &Path) -> Option<Vec<Edit>> {
-    let repo = Repository::discover(path).ok()?;
-    let workdir = repo.workdir()?;
+    let repo = discover(path.parent()?).ok()?;
+    let workdir = repo.work_dir()?;
     let abs_path = fs::canonicalize(path).ok()?;
     let repo_path = fs::canonicalize(workdir).ok()?;
     let rel_path = abs_path.strip_prefix(repo_path).ok()?;
-    let mut revwalk = repo.revwalk().ok()?;
-    revwalk.set_sorting(git2::Sort::TIME).ok()?;
-    revwalk.push_head().ok()?;
-    let mut history: Vec<Edit> = revwalk
+    let mut history: Vec<Edit> = repo
+        .rev_walk([repo.head_id().unwrap()])
+        .all()
+        .ok()?
         .filter_map(|rev| {
             rev.ok()
-                .and_then(|oid| repo.find_commit(oid).ok()) // get commit
+                .and_then(|info| info.object().ok()) // get commit
                 .and_then(|commit| {
                     if is_file_changed_in_commit(&repo, &commit, &rel_path) {
+                        let message = commit.message().ok()?;
                         Some(Edit {
                             datetime: get_commit_time(&commit).unwrap_or(Utc::now()),
-                            summary: commit.summary().unwrap_or_default().to_owned(),
-                            message: commit.message().unwrap_or_default().to_owned(),
+                            summary: message.summary().to_string(),
+                            message: message.title.to_string(),
                         })
                     } else {
                         None
