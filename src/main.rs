@@ -1,15 +1,15 @@
 extern crate chrono;
 extern crate git2;
+extern crate minijinja;
 extern crate serde;
-extern crate tera;
 
 use serde::{Deserialize, Serialize};
 
 use chrono::prelude::*;
 use git2::{Commit, DiffOptions, Repository};
+use minijinja::{context, path_loader, Environment};
 use std::collections::VecDeque;
 use std::env;
-use tera::{Context, Tera};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -147,6 +147,12 @@ fn get_relative_link(relative_path: &Path) -> Option<&Path> {
     }
 }
 
+fn create_env(path: &str) -> Environment<'static> {
+    let mut env = Environment::new();
+    env.set_loader(path_loader(path));
+    env
+}
+
 fn main() {
     let args: Vec<_> = env::args().collect();
     if args.len() != 3 {
@@ -157,10 +163,10 @@ fn main() {
     let dst = Path::new(&args[2]);
     println!("{:?}", src);
     println!(
-        "initialize terra with {:?}",
+        "initialize minijinja with {:?}",
         src.join("_templates/**/*.html")
     );
-    let mut tera = Tera::new(&(src.join("_templates/**/*.html").to_str().unwrap())).unwrap();
+    let env = create_env(&(src.join("_templates").to_str().unwrap()));
     let mut queue = VecDeque::new();
     queue.push_back(PathBuf::from(src));
     println!("let's roll");
@@ -189,26 +195,27 @@ fn main() {
                 if ext.map_or(false, |e| e == "html") {
                     println!("write to {:?}", dst_path);
                     let page = Page::new(path.as_ref());
-                    let mut context = Context::new();
-                    context.insert("title", &page.meta.title);
-                    context.insert("description", &page.meta.description);
-                    context.insert("image", &page.meta.image);
-                    context.insert("published_time", &page.meta.published_time.to_rfc3339());
-                    context.insert(
-                        "last_modified_time",
-                        &page.meta.last_modified_time.to_rfc3339(),
-                    );
-                    context.insert(
-                        "date",
-                        &page
-                            .meta
-                            .published_time
-                            .format_localized("%e %B %Y", Locale::ru_RU)
-                            .to_string(),
-                    );
-                    context.insert("link", &get_relative_link(relative_path));
-                    context.insert("history", &page.meta.history);
-                    let result = tera.render_str(&page.template, &context).unwrap();
+
+                    let result = env
+                        .render_str(
+                            &page.template,
+                            context! {
+                                title => &page.meta.title,
+                                description => &page.meta.description,
+                                image => &page.meta.image,
+                                published_time => &page.meta.published_time.to_rfc3339(),
+                                last_modified_time => &page.meta.last_modified_time.to_rfc3339(),
+                                date =>
+                                    &page
+                                        .meta
+                                        .published_time
+                                        .format_localized("%e %B %Y", Locale::ru_RU)
+                                        .to_string(),
+                                link => &get_relative_link(relative_path),
+                                history => &page.meta.history,
+                            },
+                        )
+                        .unwrap();
                     if let Err(err) = fs::write(dst_path, result) {
                         println!("{:?}", err);
                     }
