@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{Locale, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::history;
